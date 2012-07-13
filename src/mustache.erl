@@ -1,6 +1,7 @@
 %% The MIT License
 %%
 %% Copyright (c) 2009 Tom Preston-Werner <tom@mojombo.com>
+%%               & 2010 Steven Gravell <steve@mokele.co.uk>
 %%
 %% Permission is hereby granted, free of charge, to any person obtaining a copy
 %% of this software and associated documentation files (the "Software"), to deal
@@ -23,13 +24,13 @@
 %% See the README at http://github.com/mojombo/mustache.erl for additional
 %% documentation and usage examples.
 
--module(mustache).  %% v0.1.0
+-module(mustache).
 -author("Tom Preston-Werner").
+-author("Steven Gravell").
+-vsn("0.2.0").
 -export([compile/1, compile/2, render/1, render/2, render/3, get/2, get/3, escape/1, start/1]).
 
--record(mstate, {mod = undefined,
-                 section_re = undefined,
-                 tag_re = undefined}).
+-record(mstate, {mod = undefined, binmod = <<"undefined">>, i=0}).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -53,11 +54,10 @@ compile(Mod, File) ->
   code:purge(Mod),
   {module, _} = code:load_file(Mod),
   {ok, TemplateBin} = file:read_file(File),
-  Template = re:replace(TemplateBin, "\"", "\\\\\"", [global, {return,list}]),
-  State = #mstate{mod = Mod},
-  CompiledTemplate = pre_compile(Template, State),
-  % io:format("~p~n~n", [CompiledTemplate]),
-  % io:format(CompiledTemplate ++ "~n", []),
+  State = #mstate{mod = Mod, binmod = atom_to_binary(Mod,utf8)},
+  CompiledTemplate = pre_compile(TemplateBin, State),
+  % io:format("~s~n~n", [CompiledTemplate]),
+  % io:format("File: ~p" ++ CompiledTemplate ++ "~n", [File]),
   {ok, Tokens, _} = erl_scan:string(CompiledTemplate),
   {ok, [Form]} = erl_parse:parse_exprs(Tokens),
   Bindings = erl_eval:new_bindings(),
@@ -84,73 +84,112 @@ render(Mod, CompiledTemplate, Ctx) ->
   lists:flatten(CompiledTemplate(Ctx2)).
 
 pre_compile(T, State) ->
-  SectionRE = "\{\{\#([^\}]*)}}\s*(.+?){{\/\\1\}\}\s*",
-  {ok, CompiledSectionRE} = re:compile(SectionRE, [dotall]),
-  TagRE = "\{\{(#|=|!|<|>|\{)?(.+?)\\1?\}\}+",
-  {ok, CompiledTagRE} = re:compile(TagRE, [dotall]),
-  State2 = State#mstate{section_re = CompiledSectionRE, tag_re = CompiledTagRE},
-  "fun(Ctx) -> " ++
-    "CFun = fun(_Key, A, B) -> A end, " ++
-    compiler(T, State2) ++ " end.".
+  Compiled = compiler(T, State),
+  binary_to_list(
+  <<"fun(Ctx) -> ",
+      "CFun = fun(_K, A, B) -> A end, ",
+      Compiled/binary,
+    " end.">>).
+
+unreel_stack(Stack) ->
+  unreel_stack(lists:reverse(Stack), <<>>).
+unreel_stack([], Bin) ->
+  Bin;
+unreel_stack([H|T], Bin) ->
+  unreel_stack(T, <<Bin/binary,H/binary>>).
 
 compiler(T, State) ->
-  Res = re:run(T, State#mstate.section_re),
-  case Res of
-    {match, [{M0, M1}, {N0, N1}, {C0, C1}]} ->
-      Front = string:substr(T, 1, M0),
-      Back = string:substr(T, M0 + M1 + 1),
-      Name = string:substr(T, N0 + 1, N1),
-      Content = string:substr(T, C0 + 1, C1),
-      "[" ++ compile_tags(Front, State) ++
-        " | [" ++ compile_section(Name, Content, State) ++
-        " | [" ++ compiler(Back, State) ++ "]]]";
-    nomatch ->
-      compile_tags(T, State)
-  end.
+  compiler(T, <<>>, [], State).
 
-compile_section(Name, Content, State) ->
-  Mod = State#mstate.mod,
-  Result = compiler(Content, State),
-  "fun() -> " ++
-    "case mustache:get(" ++ Name ++ ", Ctx, " ++ atom_to_list(Mod) ++ ") of " ++
-      "\"true\" -> " ++
-        Result ++ "; " ++
-      "\"false\" -> " ++
-        "[]; " ++
-       "_ -> " ++
-        "[fun(Ctx) -> " ++ Result ++ " end(dict:merge(CFun, SubCtx, Ctx)) || SubCtx <- mustache:get(" ++ Name ++ ", Ctx, " ++ atom_to_list(Mod) ++ ")] " ++
-    "end " ++
-  "end()".
+compiler(<<>>, Buf, Stack, _State) ->
+  Unreeled = unreel_stack(Stack),
+  <<$",Buf/binary,Unreeled/binary,$">>;
 
-compile_tags(T, State) ->
-  Res = re:run(T, State#mstate.tag_re),
-  case Res of
-    {match, [{M0, M1}, K, {C0, C1}]} ->
-      Front = string:substr(T, 1, M0),
-      Back = string:substr(T, M0 + M1 + 1),
-      Content = string:substr(T, C0 + 1, C1),
-      Kind = tag_kind(T, K),
-      Result = compile_tag(Kind, Content, State),
-      "[\"" ++ Front ++
-        "\" | [" ++ Result ++
-        " | " ++ compile_tags(Back, State) ++ "]]";
-    nomatch ->
-      "[\"" ++ T ++ "\"]"
-  end.
+compiler(<<$"/utf8,R/binary>>, Buf, Stack, State) ->
+  compiler(R, <<Buf/binary,$\\/utf8,$"/utf8>>, Stack, State);
 
-tag_kind(_T, {-1, 0}) ->
-  none;
-tag_kind(T, {K0, K1}) ->
-  string:substr(T, K0 + 1, K1).
+compiler(<<${/utf8,${/utf8,${/utf8,R/binary>>, Buf, Stack, State) ->
+  maybe_tag(R, <<>>, [Buf|Stack], State);
+compiler(<<${/utf8,${/utf8,R/binary>>, Buf, Stack, State) ->
+  maybe_tag(R, <<>>, [Buf|Stack], State);
 
-compile_tag(none, Content, State) ->
-  Mod = State#mstate.mod,
-  "mustache:escape(mustache:get(" ++ Content ++ ", Ctx, " ++ atom_to_list(Mod) ++ "))";
-compile_tag("{", Content, State) ->
-  Mod = State#mstate.mod,
-  "mustache:get(" ++ Content ++ ", Ctx, " ++ atom_to_list(Mod) ++ ")";
-compile_tag("!", _Content, _State) ->
-  "[]".
+compiler(<<C/utf8,R/binary>>, Buf, Stack, State) ->
+  compiler(R, <<Buf/binary,C/utf8>>, Stack, State).
+
+maybe_tag(<<$}/utf8,$}/utf8,$}/utf8,R/binary>>, Buf, [SoFar|Stack], State) ->
+  BinMod = State#mstate.binmod,
+  Compiled = <<"\"++mustache:get('",Buf/binary,"', Ctx, ",BinMod/binary,")++\"">>,
+  compiler(R, <<SoFar/binary,Compiled/binary>>, Stack, State);
+maybe_tag(<<$}/utf8,$}/utf8,R/binary>>, Buf, [SoFar|Stack], State) ->
+  BinMod = State#mstate.binmod,
+  Compiled = <<"\"++mustache:escape(mustache:get('",Buf/binary,"', Ctx, ",BinMod/binary,"))++\"">>,
+  compiler(R, <<SoFar/binary,Compiled/binary>>, Stack, State);
+
+maybe_tag(<<$^/utf8,R/binary>>, <<>>, Stack, State) ->
+  {R2,Tag} = tag_name(R),
+  compiler(R2, <<>>, [{negative,Tag}|Stack], State);
+maybe_tag(<<$#/utf8,R/binary>>, <<>>, Stack, State) ->
+  {R2,Tag} = tag_name(R),
+  compiler(R2, <<>>, [Tag|Stack], State);
+
+maybe_tag(<<$//utf8,R/binary>>, <<>>, [Content|[{negative,_StartTag}|[SoFar|Stack]]], State) ->
+  {R2,Tag} = tag_name(R),
+  %% TODO: compare Tag and StartTag to provide a nice debug msg
+  BinMod = State#mstate.binmod,
+  Compiled = <<"\" ++ fun() -> ",
+    "case mustache:get('",Tag/binary,"', Ctx, ",BinMod/binary,") of ",
+      "[] -> ",
+        "\"",Content/binary,"\"; ",
+      "false -> ",
+        "\"",Content/binary,"\"; ",
+      "_ -> ",
+        "[]",
+    "end ",
+  "end() ++ \"">>,
+  compiler(R2, <<SoFar/binary,Compiled/binary>>, Stack, State);
+
+maybe_tag(<<$//utf8,R/binary>>, <<>>, [Content|[_StartTag|[SoFar|Stack]]], State) ->
+  {R2,Tag} = tag_name(R),
+  %% TODO: compare Tag and StartTag to provide a nice debug msg
+  BinMod = State#mstate.binmod,
+  {Var,State2} = var(State),
+  Compiled = <<"\" ++ fun() -> ",
+    "case mustache:get('",Tag/binary,"', Ctx, ",BinMod/binary,") of ",
+      "true -> ",
+        "\"",Content/binary,"\"; ",
+      "[] -> ",
+        "[];",
+      "false -> ",
+        "[];",
+      Var/binary," when is_list(",Var/binary,") -> ",
+        "[fun(Ctx) -> \"",Content/binary,"\" end(dict:merge(CFun, SubCtx, Ctx)) || SubCtx <- ",Var/binary,"]; ",
+      "_ -> ",
+        "throw({template, io_lib:format(\"Bad context for ~p~n\", ['",Tag/binary,"'])}) ",
+    "end ",
+  "end() ++ \"">>,
+  compiler(R2, <<SoFar/binary,Compiled/binary>>, Stack, State2);
+maybe_tag(<<$!/utf8,R/binary>>, <<>>, [SoFar|Stack], State) ->
+  comment(R, SoFar, Stack, State);
+maybe_tag(<<${/utf8,R/binary>>, <<>>, [SoFar|Stack], State) ->
+  compiler(R, <<SoFar/binary,${/utf8,${/utf8,${/utf8>>, Stack, State);
+maybe_tag(<<" "/utf8,R/binary>>, Buf, Stack, State) ->
+  maybe_tag(R, Buf, Stack, State);
+maybe_tag(<<C/utf8,R/binary>>, Buf, Stack, State) ->
+  maybe_tag(R, <<Buf/binary,C/utf8>>, Stack, State).
+
+comment(<<$}/utf8,$}/utf8,R/binary>>, Buf, Stack, State) ->
+  compiler(R, Buf, Stack, State);
+comment(<<_/utf8,R/binary>>, Buf, Stack, State) ->
+  comment(R, Buf, Stack, State).
+
+tag_name(R) ->
+  tag_name(R, <<>>).
+tag_name(<<$}/utf8,$}/utf8,R/binary>>, Name) ->
+  {R,Name};
+tag_name(<<" "/utf8,R/binary>>, Name) ->
+  tag_name(R, Name);
+tag_name(<<C/utf8,R/binary>>, Name) ->
+  tag_name(R, <<Name/binary,C/utf8>>).
 
 template_dir(Mod) ->
   DefaultDirPath = filename:dirname(code:which(Mod)),
@@ -163,6 +202,17 @@ template_dir(Mod) ->
     _ ->
       DefaultDirPath
   end.
+
+%% due to all our fun()s being nested we can't use the some name for all variables
+%% used within them, so we have to keep a counter "i" in our state to allocate
+%% variable names. e.g. Var0, Var1, Var2, and so on
+var(State) ->
+  var("Var", State).
+var(Name, #mstate{i=I}=State) ->
+  S = list_to_binary(integer_to_list(I)),
+  BName = list_to_binary(Name),
+  {<<BName/binary,S/binary>>, State#mstate{i=I+1}}.
+
 template_path(Mod) ->
   DirPath = template_dir(Mod),
   Basename = atom_to_list(Mod),
@@ -214,11 +264,11 @@ escape(HTML) ->
 
 escape([], Acc) ->
   lists:reverse(Acc);
-escape(["<" | Rest], Acc) ->
+escape([$< | Rest], Acc) ->
   escape(Rest, lists:reverse("&lt;", Acc));
-escape([">" | Rest], Acc) ->
+escape([$> | Rest], Acc) ->
   escape(Rest, lists:reverse("&gt;", Acc));
-escape(["&" | Rest], Acc) ->
+escape([$& | Rest], Acc) ->
   escape(Rest, lists:reverse("&amp;", Acc));
 escape([X | Rest], Acc) ->
   escape(Rest, [X | Acc]).

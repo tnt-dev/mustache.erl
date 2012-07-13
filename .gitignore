@@ -1,4 +1,5 @@
-*.beam
+ebin/*.app
+ebin/*.beam
 *.dump
 ebin
 .eunit
