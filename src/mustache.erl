@@ -241,4 +241,17 @@ integer_values_too_test() ->
     Result = render("Hello {{name}}~nYou have just won ${{value}}!", Ctx),
     ?assertEqual("Hello Chris~nYou have just won $10000!", Result).
 
+example_views_test_() ->
+    ViewsToTest = [simple, complex, nonl, unescaped],
+    [ fun() ->
+            ViewStr = atom_to_list(View),
+            try
+                {ok, View} = compile:file("../examples/"++ ViewStr ++ ".erl", [debug_info]),
+                Result = mustache:render(View, "../examples/" ++ ViewStr ++ ".mustache"),
+                {ok, ExpectedBin} = file:read_file("../examples/" ++ ViewStr ++ ".output"),
+                ?assertEqual(ExpectedBin, list_to_binary(Result))
+            after
+                file:delete(ViewStr ++ ".beam")
+            end
+      end || View <- ViewsToTest].
 -endif.
