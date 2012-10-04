@@ -81,7 +81,7 @@ render(Mod, File, Ctx) when is_list(File) ->
   render(Mod, CompiledTemplate, Ctx);
 render(Mod, CompiledTemplate, Ctx) ->
   Ctx2 = dict:store('__mod__', Mod, Ctx),
-  lists:flatten(CompiledTemplate(Ctx2)).
+  CompiledTemplate(Ctx2).
 
 pre_compile(T, State) ->
   Compiled = compiler(T, State),
