@@ -36,7 +36,7 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
-compile(Body) when is_list(Body) ->
+compile(Body) when is_list(Body) orelse is_binary(Body) ->
   State = #mstate{},
   CompiledTemplate = pre_compile(Body, State),
   % io:format("~p~n~n", [CompiledTemplate]),
@@ -68,7 +68,7 @@ render(Mod) ->
   TemplatePath = template_path(Mod),
   render(Mod, TemplatePath).
 
-render(Body, Ctx) when is_list(Body) ->
+render(Body, Ctx) when is_list(Body) orelse is_binary(Body) ->
   TFun = compile(Body),
   render(undefined, TFun, Ctx);
 render(Mod, File) when is_list(File) ->
